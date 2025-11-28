@@ -1,0 +1,5 @@
+{
+  "name": "isoWorld",
+  "description": "A high-performance isometric voxel engine using HTML5 Canvas and React. Features procedural terrain, 360-degree rotation, mining mechanics, and dynamic occlusion culling without external 3D libraries.",
+  "requestFramePermissions": []
+}
