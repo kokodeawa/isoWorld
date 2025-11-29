@@ -1,9 +1,12 @@
-import React, { useState, useCallback, useEffect, ErrorInfo, ReactNode, useRef } from 'react';
+
+import React, { Component, useState, useCallback, useEffect, ErrorInfo, ReactNode, useRef } from 'react';
 import { GameCanvas, GameCanvasRef } from './components/GameCanvas';
-import { UIOverlay, NavigationDirection } from './components/UIOverlay';
-import { BlockType, CameraState, ChunkCoordinates, GameMode, EngineStats, ExplorationData } from './types';
-import { WORLD_HEIGHT } from './constants';
+import { UIOverlay } from './components/UIOverlay';
+import { BlockType, CameraState, ChunkCoordinates, GameMode, EngineStats, ExplorationData, NavigationDirection, TimeState, InventorySlot } from './types';
+import { WORLD_HEIGHT, TILE_SIZE } from './constants';
 import { WorldCreationMenu } from './components/WorldCreationMenu';
+import { Inventory } from './game/Inventory';
+import { BLOCK_TO_ITEM, ITEMS } from './game/itemRegistry';
 
 interface ErrorBoundaryProps {
   children?: ReactNode;
@@ -14,9 +17,18 @@ interface ErrorBoundaryState {
   error: Error | null;
 }
 
-class ErrorBoundary extends React.Component<ErrorBoundaryProps, ErrorBoundaryState> {
-  // Fix: Initialize state as a class property. This modern syntax for React class components resolves TypeScript errors where `this.state` and `this.props` were not being recognized.
-  state: ErrorBoundaryState = { hasError: false, error: null };
+class ErrorBoundary extends Component<ErrorBoundaryProps, ErrorBoundaryState> {
+  readonly props: Readonly<ErrorBoundaryProps>;
+
+  public state: ErrorBoundaryState = {
+    hasError: false,
+    error: null
+  };
+
+  constructor(props: ErrorBoundaryProps) {
+    super(props);
+    this.props = props;
+  }
 
   static getDerivedStateFromError(error: Error): ErrorBoundaryState {
     return { hasError: true, error };
@@ -59,66 +71,148 @@ interface GameProps {
   worldSeed: string;
 }
 
+const INVENTORY_SIZE = 35; // 27 backpack + 8 hotbar
+
 function Game({ worldName, worldSeed }: GameProps) {
   const [mode, setMode] = useState<GameMode>(GameMode.CAMERA);
   const [renderHeight, setRenderHeight] = useState<number>(WORLD_HEIGHT);
   const [stats, setStats] = useState<EngineStats>({ fps: 0, visibleBlocks: 0, chunk: {x: 0, y: 0} });
   const [explorationData, setExplorationData] = useState<ExplorationData>({ visited: new Set(['0,0']), current: { x: 0, y: 0 } });
+  const [timeState, setTimeState] = useState<TimeState | null>(null);
   const gameCanvasRef = useRef<GameCanvasRef>(null);
 
-  const inventoryKey = `isovoxel_inventory_${worldName}`;
+  // --- NUEVO SISTEMA DE INVENTARIO ---
+  const inventoryRef = useRef<Inventory | null>(null);
+  const [inventorySlots, setInventorySlots] = useState<(InventorySlot | null)[]>(new Array(INVENTORY_SIZE).fill(null));
+  const [selectedHotbarIndex, setSelectedHotbarIndex] = useState(0); // Índice 0-7 para la hotbar
+  const [selectedBlockForPlacement, setSelectedBlockForPlacement] = useState<BlockType | null>(null);
 
-  const [inventory, setInventory] = useState<Record<BlockType, number>>(() => {
+  const inventorySaveKey = `isoworld_inventory_${worldSeed}`;
+
+  // Cargar inventario al iniciar
+  useEffect(() => {
     try {
-      const saved = localStorage.getItem(inventoryKey);
-      if (saved) {
-        const parsed = JSON.parse(saved);
-        if (parsed && typeof parsed === 'object') return parsed;
-      }
-    } catch (e) { console.warn("Failed to load save:", e); }
-    return { [BlockType.AIR]: 0, [BlockType.BEDROCK]: 0, [BlockType.GRASS]: 0, [BlockType.DIRT]: 0, [BlockType.STONE]: 0, [BlockType.LOG]: 0, [BlockType.LEAVES]: 0 };
-  });
+      const savedData = localStorage.getItem(inventorySaveKey);
+      const savedSlots = savedData ? JSON.parse(savedData) : null;
+      inventoryRef.current = new Inventory(INVENTORY_SIZE, savedSlots);
+      setInventorySlots(inventoryRef.current.slots);
+    } catch (e) {
+      console.error("Failed to load inventory:", e);
+      inventoryRef.current = new Inventory(INVENTORY_SIZE);
+      setInventorySlots(inventoryRef.current.slots);
+    }
+  }, [worldSeed, inventorySaveKey]);
+
+  // Guardar inventario cuando cambie
+  useEffect(() => {
+    try {
+        if (inventoryRef.current) {
+            localStorage.setItem(inventorySaveKey, JSON.stringify(inventoryRef.current.slots));
+        }
+    } catch (e) {
+        console.error("Failed to save inventory:", e);
+    }
+  }, [inventorySlots, inventorySaveKey]);
+
 
   const [camera, setCameraState] = useState<CameraState>({
     x: 0,
-    y: 200,
+    y: 0, // Will be calculated on init
     zoom: 1.2,
     angle: Math.PI / 4,
+    pitch: Math.PI / 6, // 30 degrees default for isometric view
   });
-
-  useEffect(() => {
-    if (gameCanvasRef.current?.engine) {
-      setExplorationData(gameCanvasRef.current.engine.getExplorationData());
-    }
-  }, [worldSeed]); // Runs when engine is created
-
-  useEffect(() => {
-    try {
-      localStorage.setItem(inventoryKey, JSON.stringify(inventory));
-    } catch (e) {
-      console.error("Failed to save progress:", e);
-    }
-  }, [inventory, inventoryKey]);
 
   const updateCamera = useCallback((newCam: Partial<CameraState>) => {
     setCameraState(prev => ({ ...prev, ...newCam }));
   }, []);
 
-  const handleInventoryUpdate = useCallback((block: BlockType) => {
-    setInventory(prev => ({ ...prev, [block]: (prev[block] || 0) + 1 }));
+  const handleAngleChange = useCallback((newAngle: number) => {
+    const engine = gameCanvasRef.current?.engine;
+    if (engine) {
+      const nextState = engine.rotateCameraAroundScreenCenter(newAngle);
+      setCameraState(nextState);
+    } else {
+      setCameraState(prev => ({ ...prev, angle: newAngle }));
+    }
   }, []);
+
+  const handlePitchChange = useCallback((newPitch: number) => {
+     setCameraState(prev => ({ ...prev, pitch: newPitch }));
+  }, []);
+
+  const centerCameraOnSurface = useCallback(() => {
+    const engine = gameCanvasRef.current?.engine;
+    if (engine) {
+      const avgHeight = engine.getCurrentChunkAverageHeight();
+      setCameraState(prev => {
+        const targetY = avgHeight * TILE_SIZE * prev.zoom;
+        return { ...prev, y: targetY };
+      });
+    }
+  }, []);
+  
+  const handleEngineReady = useCallback(() => {
+    if (gameCanvasRef.current?.engine) {
+      setExplorationData(gameCanvasRef.current.engine.getExplorationData());
+      centerCameraOnSurface();
+    }
+  }, [centerCameraOnSurface]);
+
+  // --- Callbacks del motor de juego ---
+  const handleInventoryUpdate = useCallback((minedBlock: BlockType) => {
+    const itemId = BLOCK_TO_ITEM[minedBlock];
+    if (itemId && inventoryRef.current) {
+        inventoryRef.current.addItem(itemId, 1);
+        setInventorySlots([...inventoryRef.current.slots]); // Clonar para forzar re-render
+    }
+  }, []);
+  
+  const handleBlockPlaced = useCallback((placedBlock: BlockType) => {
+    if (inventoryRef.current) {
+        inventoryRef.current.removeItemFromSlot(selectedHotbarIndex, 1);
+        setInventorySlots([...inventoryRef.current.slots]);
+    }
+  }, [selectedHotbarIndex]);
 
   const handleStatsUpdate = useCallback((fps: number, blocks: number, chunk: ChunkCoordinates) => {
     setStats({ fps, visibleBlocks: blocks, chunk });
   }, []);
+  
+  const handleTimeUpdate = useCallback((newTimeState: TimeState) => {
+    setTimeState(newTimeState);
+  }, []);
+
+  // Actualizar el bloque que el motor puede colocar cuando cambia la selección de la hotbar
+  useEffect(() => {
+      const engine = gameCanvasRef.current?.engine;
+      if (engine && inventoryRef.current) {
+          const selectedSlot = inventoryRef.current.getSlot(selectedHotbarIndex);
+          let blockToPlace: BlockType | null = null;
+          if (selectedSlot) {
+              const itemDef = ITEMS[selectedSlot.itemId];
+              if (itemDef && itemDef.type === 'BLOCK' && itemDef.blockType) {
+                  blockToPlace = itemDef.blockType;
+              }
+          }
+          engine.selectedBlockType = blockToPlace; // El motor usa esta propiedad para saber qué colocar
+          setSelectedBlockForPlacement(blockToPlace);
+      }
+  }, [selectedHotbarIndex, inventorySlots]);
 
   const handleNavigate = useCallback((direction: NavigationDirection) => {
     const engine = gameCanvasRef.current?.engine;
     if (engine) {
       engine.navigateTo(direction);
       setExplorationData(engine.getExplorationData());
+      centerCameraOnSurface(); 
+      updateCamera({ x: 0 }); 
     }
-  }, []);
+  }, [updateCamera, centerCameraOnSurface]);
+
+  if (!inventoryRef.current) {
+      return null; // O un spinner de carga
+  }
 
   return (
     <div className="relative w-screen h-[100dvh] bg-slate-900 overflow-hidden font-sans">
@@ -128,20 +222,29 @@ function Game({ worldName, worldSeed }: GameProps) {
         mode={mode}
         camera={camera}
         renderHeight={renderHeight}
+        selectedBlock={selectedBlockForPlacement}
         setCamera={updateCamera}
         onInventoryUpdate={handleInventoryUpdate}
+        onBlockPlaced={handleBlockPlaced}
         onStatsUpdate={handleStatsUpdate}
+        onTimeUpdate={handleTimeUpdate}
+        onReady={handleEngineReady}
       />
       <UIOverlay 
         mode={mode}
         setMode={setMode}
-        inventory={inventory}
+        inventory={inventoryRef.current}
+        selectedHotbarIndex={selectedHotbarIndex}
+        onSelectHotbarIndex={setSelectedHotbarIndex}
         explorationData={explorationData}
         camera={camera}
         setCamera={updateCamera}
         renderHeight={renderHeight}
         setRenderHeight={setRenderHeight}
         onNavigate={handleNavigate}
+        onAngleChange={handleAngleChange}
+        onPitchChange={handlePitchChange}
+        timeState={timeState}
       />
     </div>
   );

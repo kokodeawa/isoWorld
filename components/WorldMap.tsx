@@ -1,7 +1,7 @@
+
 import React from 'react';
 import { ArrowUp, ArrowDown, ArrowLeft, ArrowRight, MapPin } from 'lucide-react';
-import { ExplorationData } from '../types';
-import { NavigationDirection } from './UIOverlay';
+import { ExplorationData, NavigationDirection } from '../types';
 
 interface WorldMapProps {
   explorationData: ExplorationData;
